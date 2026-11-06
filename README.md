@@ -1,2 +1,111 @@
-# keyboardSwicth
-this tool can help you to change your key assignments and setting your own hotkeys.. /Windows 全局快捷键映射工具：Alt+, → ←，随时切换方案
+# KeySwitcher · 随时可切换的快捷键映射工具
+
+一个绿色的 Windows 小工具：把任意组合键映射成另一个按键，全局生效，随时改、随时切换。
+默认已经预置了你需要的两条：
+
+| 按下 | 发送 |
+|---|---|
+| `Alt` + `,` | `←` |
+| `Alt` + `.` | `→` |
+
+双击 `KeySwitcher.exe` 即生效，程序缩到系统托盘常驻。**不需要安装任何运行时**（用系统自带的 .NET Framework）。
+
+---
+
+## 快速开始
+
+1. 双击 `KeySwitcher.exe`。
+2. 在记事本 / 浏览器里按 `Alt` + `,`，光标应当左移（而不是触发浏览器的"后退"）。
+3. 想改映射：在主窗口双击任意一行，点「录制…」按下新组合键，保存即生效。
+4. 想临时全部停掉：按 `Ctrl` + `Alt` + `F9`，或在托盘图标右键取消「启用映射」。
+
+> 如果目标程序是以管理员身份运行的（例如任务管理器、部分游戏启动器、某些编辑器），普通权限的程序收不到它的按键。
+> 这时点主窗口右下角「以管理员身份重启」即可。
+
+## 功能
+
+- **任何组合键 → 任何按键**：支持 Ctrl / Alt / Shift 任意组合，字母、数字、F1–F24、方向键、小键盘、多媒体键、标点键都能映射。
+- **两种触发方式**
+  - `单击`：按一下触发一次（方向键、复制粘贴这类用这个）。
+  - `按住`：按下持续、松开结束（需要长按的操作，比如游戏里的移动）。
+- **多套方案**：顶部「方案」下拉框可建多套映射（例如「办公」「游戏」），一键切换，改动立即生效。
+- **总开关热键**：默认 `Ctrl` + `Alt` + `F9`，全局随时启用/暂停，可在界面里改成别的键。
+- **单条开关**：表格第一列勾选框，随时停用某一条而不删除。
+- **托盘常驻**：关闭窗口不会退出（可在设置里改），右键托盘图标可切换方案、暂停、退出。
+- **开机自启**：勾选后写入当前用户的启动项，可在界面或托盘菜单随时取消。
+- **配置可导出/导入**：纯文本配置，方便备份和分享。
+
+## 配置文件
+
+默认位置：`%APPDATA%\KeySwitcher\config.ini`
+
+如果这个目录被安全策略禁止写入，会自动回退到程序同级的 `KeySwitcher-data\config.ini`。
+界面里点「打开配置目录」可以直接定位。
+
+格式很简单，可直接用记事本改（保持 UTF-8）：
+
+```ini
+version=1
+master=1
+active=默认
+toggle=Ctrl+Alt+F9
+autostart=0
+tray=1
+
+[profile=默认]
+rule=1|Alt + , → ←|Alt+OemComma|Left|tap
+rule=1|Alt + . → →|Alt+OemPeriod|Right|tap
+```
+
+`rule` 字段依次是：启用(1/0) | 显示名称 | 触发键 | 目标键 | 模式(tap 单击 / hold 按住)。
+键名用英文写法，例如 `Left` `Right` `Up` `Down` `OemComma` `OemPeriod` `F9` `A` `Numpad5`。
+
+## 常见问题
+
+**按 `Alt` + `,` 没反应？**
+先看托盘图标是否还在、主窗口右上角「启用映射」是否勾选；再确认目标窗口是不是管理员权限（见上面的说明）。
+也可以打开记事本测试一次，排除是某个特定程序拦截了按键。
+
+**为什么不用的时候要暂停？**
+映射会接管该组合键的系统输入。ALT 组合键通常没被占用，但如果你在某个程序里本来就要用 `Alt + ,`，暂停或换一套方案即可。
+
+**会不会触发菜单栏？**
+不会。ALT 组合键在抬起时容易激活窗口菜单栏，程序内部已经做了"掩码"处理（和在 AutoHotkey 里配置 `#MenuMaskKey` 是同一个原理）。
+
+**在某些游戏里无效？**
+带反作弊内核驱动的游戏会屏蔽全局键盘钩子，这是有意为之的安全限制，任何同类工具都一样。
+
+**杀毒软件报毒？**
+这类程序需要安装全局键盘钩子，容易被启发式规则误报。源码就在 `src\KeySwitcher.cs`，可以自行审阅、自行编译。
+
+## 卸载
+
+1. 托盘图标右键 → 退出 KeySwitcher。
+2. 取消勾选「开机自动启动」（或删除注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\KeySwitcher`）。
+3. 删除 `KeySwitcher.exe` 和 `%APPDATA%\KeySwitcher` 目录。
+
+## 从源码构建
+
+需要 Windows 10/11 自带的 .NET Framework 4.x（含 `csc.exe`），无需安装 Visual Studio：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+产物是根目录下的 `KeySwitcher.exe`（单文件，约 78 KB，含图标与 DPI 声明）。
+
+目录结构：
+
+```
+KeySwitcher.exe      编译好的程序（直接双击使用）
+build.ps1            一键构建脚本（含图标生成）
+src\KeySwitcher.cs   全部源码（单文件，WinForms + 全局键盘钩子）
+src\app.manifest     DPI / 权限清单
+src\app.ico          程序图标（由 build.ps1 生成）
+```
+
+内置自检（不弹界面，仅跑逻辑与配置读写测试，结果写入 `selftest.log`）：
+
+```powershell
+.\KeySwitcher.exe --selftest
+```
