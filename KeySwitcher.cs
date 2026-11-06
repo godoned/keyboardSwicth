@@ -65,7 +65,8 @@ namespace KeySwitcher
             bool hookOk = _hook.Start();
 
             bool startHidden = HasArg(args, "--tray");
-            var form = new MainForm(startHidden, hookOk);
+            bool autoDiag = HasArg(args, "--diag");
+            var form = new MainForm(startHidden, hookOk, autoDiag);
             Application.Run(form);
 
             MainForm.TraceLog("Application.Run returned");
@@ -719,6 +720,41 @@ namespace KeySwitcher
         public static bool Diagnostics;
         public static volatile string LastEventInfo = "";
 
+        internal static int DiagEvents;
+        internal static int DiagMatched;
+        private static readonly object DiagSync = new object();
+        private static readonly Queue<string> DiagRecent = new Queue<string>();
+
+        internal static void ResetDiag()
+        {
+            lock (DiagSync) { DiagRecent.Clear(); }
+            DiagEvents = 0;
+            DiagMatched = 0;
+        }
+
+        internal static string[] GetDiag()
+        {
+            lock (DiagSync) { return DiagRecent.ToArray(); }
+        }
+
+        private static void RecordDiag(ushort vk, bool ctrl, bool alt, bool shift, RuleSpec rule)
+        {
+            Interlocked.Increment(ref DiagEvents);
+            if (rule != null) Interlocked.Increment(ref DiagMatched);
+            string line = DateTime.Now.ToString("HH:mm:ss") + "   " + KeyCodec.DisplayCombo(ctrl, alt, shift, vk);
+            if (rule != null) line += "    ⇒    " + rule.TargetDisplay;
+            lock (DiagSync)
+            {
+                DiagRecent.Enqueue(line);
+                while (DiagRecent.Count > 12) DiagRecent.Dequeue();
+            }
+        }
+
+        public bool IsAlive
+        {
+            get { return _installed && _thread != null && _thread.IsAlive; }
+        }
+
         // 自检用：可替换的按键状态源与注入出口（正式运行时均为 null）
         internal static Func<ushort, bool> TestKeyState;
         internal static Action<ushort, bool, bool> TestSink;
@@ -853,6 +889,7 @@ namespace KeySwitcher
                     if (!snap.Master) return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
 
                     RuleSpec rule = Engine.FindMatch(snap.Rules, (ushort)vk, ctrl, alt, shift);
+                    if (Diagnostics) RecordDiag((ushort)vk, ctrl, alt, shift, rule);
                     if (rule == null) return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
 
                     Interlocked.Increment(ref MatchCount);
@@ -1294,10 +1331,13 @@ namespace KeySwitcher
         private bool _trayHintShown;
         private string _lastSeenAction = "";
 
-        public MainForm(bool startHidden, bool hookOk)
+        private readonly bool _autoDiag;
+
+        public MainForm(bool startHidden, bool hookOk, bool autoDiag)
         {
             _startHidden = startHidden;
             _hookOk = hookOk;
+            _autoDiag = autoDiag;
 
             Text = "KeySwitcher · 快捷键映射";
             ClientSize = new Size(980, 640);
@@ -1541,6 +1581,16 @@ namespace KeySwitcher
             linkConfig.Location = new Point(392, 60);
             _footer.Controls.Add(linkConfig);
             linkConfig.LinkClicked += delegate { OpenConfigFolder(); };
+
+            var linkDiag = new LinkLabel();
+            linkDiag.Text = "按键诊断";
+            linkDiag.AutoSize = true;
+            linkDiag.LinkColor = Theme.Accent;
+            linkDiag.ActiveLinkColor = Theme.AccentDark;
+            linkDiag.VisitedLinkColor = Theme.Accent;
+            linkDiag.Location = new Point(506, 60);
+            _footer.Controls.Add(linkDiag);
+            linkDiag.LinkClicked += delegate { ShowDiagnostics(); };
 
             _btnElevate = Theme.MakeButton("以管理员身份重启", 132, false);
             _btnElevate.Height = 26;
@@ -2122,6 +2172,12 @@ namespace KeySwitcher
             catch { }
         }
 
+        private void ShowDiagnostics()
+        {
+            using (var dlg = new DiagnosticsForm(_hookOk))
+                dlg.ShowDialog(this);
+        }
+
         private void ExitApp()
         {
             _realExit = true;
@@ -2183,6 +2239,10 @@ namespace KeySwitcher
         {
             base.OnShown(e);
             _grid.Focus();
+            if (_autoDiag)
+            {
+                BeginInvoke(new Action(delegate { ShowDiagnostics(); }));
+            }
             if (_startHidden)
             {
                 Hide();
@@ -2674,6 +2734,164 @@ namespace KeySwitcher
             {
                 if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
                 return dlg._txt.Text;
+            }
+        }
+    }
+
+    // =====================================================================
+    // 按键诊断窗口
+    // =====================================================================
+    internal sealed class DiagnosticsForm : Form
+    {
+        private readonly bool _hookOk;
+        private TextBox _box;
+        private Label _lblHook;
+        private Label _lblCount;
+        private Label _lblCaret;
+        private ListBox _list;
+        private Timer _timer;
+        private string _lastDiag = "";
+
+        public DiagnosticsForm(bool hookOk)
+        {
+            _hookOk = hookOk;
+            Text = "按键诊断";
+            ClientSize = new Size(660, 470);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            Font = Theme.UiFont();
+            BackColor = Color.White;
+            AutoScaleMode = AutoScaleMode.Dpi;
+
+            var lbl = new Label();
+            lbl.Text = "① 点击下面的输入框    ② 连续按 Alt + J / Alt + K    ③ 看光标是否左右移动";
+            lbl.AutoSize = false;
+            lbl.Location = new Point(20, 16);
+            lbl.Size = new Size(620, 24);
+            lbl.ForeColor = Theme.Text;
+            Controls.Add(lbl);
+
+            _box = new TextBox();
+            _box.Multiline = true;
+            _box.WordWrap = true;
+            _box.Font = new Font(Theme.UiFont().FontFamily, 12F);
+            _box.Location = new Point(20, 44);
+            _box.Size = new Size(620, 92);
+            _box.Text = "在这里按 Alt + J 和 Alt + K：如果映射正常，光标会在这个框里左右移动。";
+            Controls.Add(_box);
+
+            _lblHook = new Label();
+            _lblHook.AutoSize = false;
+            _lblHook.Location = new Point(20, 146);
+            _lblHook.Size = new Size(620, 22);
+            Controls.Add(_lblHook);
+
+            _lblCount = new Label();
+            _lblCount.AutoSize = false;
+            _lblCount.Location = new Point(20, 170);
+            _lblCount.Size = new Size(620, 22);
+            _lblCount.ForeColor = Theme.Text;
+            Controls.Add(_lblCount);
+
+            _lblCaret = new Label();
+            _lblCaret.AutoSize = false;
+            _lblCaret.Location = new Point(20, 194);
+            _lblCaret.Size = new Size(620, 22);
+            _lblCaret.ForeColor = Theme.Muted;
+            Controls.Add(_lblCaret);
+
+            var lblRecent = new Label();
+            lblRecent.Text = "最近收到的按键（⇒ 表示匹配到映射）：";
+            lblRecent.AutoSize = false;
+            lblRecent.Location = new Point(20, 222);
+            lblRecent.Size = new Size(620, 22);
+            lblRecent.ForeColor = Theme.Muted;
+            Controls.Add(lblRecent);
+
+            _list = new ListBox();
+            _list.Location = new Point(20, 246);
+            _list.Size = new Size(620, 130);
+            _list.Font = new Font(Theme.UiFont().FontFamily, 9.5F);
+            _list.BorderStyle = BorderStyle.FixedSingle;
+            Controls.Add(_list);
+
+            var note = new Label();
+            note.Text = "判断方法：计数在增加、但输入框里的光标不动 → 系统拦截了模拟按键（安全 / 考试 / 远程控制类软件常见）。\n计数完全不动 → 键盘钩子没收到按键。";
+            note.AutoSize = false;
+            note.Location = new Point(20, 384);
+            note.Size = new Size(620, 40);
+            note.ForeColor = Theme.Muted;
+            Controls.Add(note);
+
+            var btnReset = Theme.MakeButton("清空记录", 100, false);
+            btnReset.Location = new Point(20, 428);
+            Controls.Add(btnReset);
+            btnReset.Click += delegate
+            {
+                KeyboardHook.ResetDiag();
+                _list.Items.Clear();
+                _lastDiag = "";
+                _box.Focus();
+                _box.SelectionStart = _box.TextLength;
+            };
+
+            var btnClose = Theme.MakeButton("关闭", 96, false);
+            btnClose.Location = new Point(544, 428);
+            btnClose.DialogResult = DialogResult.Cancel;
+            Controls.Add(btnClose);
+            CancelButton = btnClose;
+
+            KeyboardHook.ResetDiag();
+            KeyboardHook.Diagnostics = true;
+
+            _timer = new Timer();
+            _timer.Interval = 200;
+            _timer.Tick += delegate { RefreshDiag(); };
+            _timer.Start();
+
+            Shown += delegate
+            {
+                _box.Focus();
+                _box.SelectionStart = _box.TextLength;
+            };
+            FormClosed += delegate
+            {
+                _timer.Stop();
+                _timer.Dispose();
+                KeyboardHook.Diagnostics = false;
+            };
+
+            RefreshDiag();
+        }
+
+        private void RefreshDiag()
+        {
+            if (_hookOk)
+            {
+                _lblHook.Text = "钩子状态：已安装，正在接收按键";
+                _lblHook.ForeColor = Color.FromArgb(21, 128, 61);
+            }
+            else
+            {
+                _lblHook.Text = "钩子状态：安装失败，映射不会生效（可能被安全软件拦截）";
+                _lblHook.ForeColor = Color.FromArgb(185, 28, 28);
+            }
+
+            _lblCount.Text = "收到按键 " + KeyboardHook.DiagEvents + " 次 · 匹配映射 " + KeyboardHook.DiagMatched + " 次";
+            _lblCaret.Text = "输入框光标位置：" + _box.SelectionStart + "（按 Alt+J 应减小、Alt+K 应增大）";
+
+            string[] recent = KeyboardHook.GetDiag();
+            string joined = string.Join("|", recent);
+            if (joined != _lastDiag)
+            {
+                _lastDiag = joined;
+                _list.BeginUpdate();
+                _list.Items.Clear();
+                for (int i = recent.Length - 1; i >= 0; i--) _list.Items.Add(recent[i]);
+                _list.EndUpdate();
             }
         }
     }
